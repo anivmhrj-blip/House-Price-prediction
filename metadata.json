@@ -1,0 +1,6 @@
+{
+  "name": "House Price Prediction Platform",
+  "description": "A high-fidelity machine learning platform for custom home valuations, neighborhood price predictions, price index charting, automated listing alerts, and AI real estate analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

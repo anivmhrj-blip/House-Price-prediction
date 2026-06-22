@@ -1,0 +1,201 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE SECURITY PRIMITIVES ---
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    // Admin check: either explicitly in the admins collection or matches the user's bootstrapper email
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'anivmhrj@gmail.com'
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- ENTITY BASELINE SCHEMA VALIDATORS ---
+
+    // 1. Listing Schema Check
+    function isValidListing(data) {
+      return data.keys().hasAll(['address', 'neighborhood', 'price', 'beds', 'baths', 'sqft', 'buildYear', 'propertyType', 'status', 'createdAt'])
+        && data.keys().size() <= 12
+        && data.address is string && data.address.size() <= 200
+        && data.neighborhood is string && data.neighborhood.size() <= 100
+        && data.price is number && data.price > 0 && data.price <= 100000000
+        && data.beds is number && data.beds >= 0 && data.beds <= 100
+        && data.baths is number && data.baths >= 0 && data.baths <= 100
+        && data.sqft is number && data.sqft > 0 && data.sqft <= 100000
+        && data.buildYear is number && data.buildYear >= 1700 && data.buildYear <= 2100
+        && data.propertyType is string && data.propertyType.size() <= 50
+        && data.status is string && (data.status == 'Active' || data.status == 'Sold' || data.status == 'Pending')
+        && data.createdAt is timestamp;
+    }
+
+    // 2. SavedSearch Schema Check
+    function isValidSavedSearch(data) {
+      return data.keys().hasAll(['userId', 'neighborhood', 'maxPrice', 'minBeds', 'propertyType', 'activeNotifications', 'createdAt'])
+        && data.keys().size() == 7
+        && data.userId == request.auth.uid
+        && data.neighborhood is string && data.neighborhood.size() <= 100
+        && data.maxPrice is number && data.maxPrice >= 0 && data.maxPrice <= 100000000
+        && data.minBeds is number && data.minBeds >= 0 && data.minBeds <= 100
+        && data.propertyType is string && data.propertyType.size() <= 50
+        && data.activeNotifications is bool
+        && data.createdAt is timestamp;
+    }
+
+    // 3. Valuation Schema Check
+    function isValidValuation(data) {
+      return data.keys().hasAll(['userId', 'neighborhood', 'beds', 'baths', 'sqft', 'buildYear', 'propertyType', 'condition', 'predictedPrice', 'explanation', 'createdAt'])
+        && data.keys().size() == 11
+        && data.userId == request.auth.uid
+        && data.neighborhood is string && data.neighborhood.size() <= 100
+        && data.beds is number && data.beds >= 0 && data.beds <= 100
+        && data.baths is number && data.baths >= 0 && data.baths <= 100
+        && data.sqft is number && data.sqft > 0 && data.sqft <= 100000
+        && data.buildYear is number && data.buildYear >= 1700 && data.buildYear <= 2100
+        && data.propertyType is string && data.propertyType.size() <= 50
+        && data.condition is string && (data.condition == 'Standard' || data.condition == 'Premium' || data.condition == 'Luxury')
+        && data.predictedPrice is number && data.predictedPrice >= 0
+        && data.explanation is string && data.explanation.size() <= 5000
+        && data.createdAt is timestamp;
+    }
+
+    // 4. Notification Schema Check
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'title', 'message', 'read', 'createdAt'])
+        && (data.keys().size() == 5 || (data.keys().size() == 6 && 'listingId' in data))
+        && data.userId is string && data.userId.size() <= 128
+        && data.title is string && data.title.size() <= 200
+        && data.message is string && data.message.size() <= 1000
+        && data.read is bool
+        && data.createdAt is timestamp;
+    }
+
+    // 5. MarketTrend Schema Check
+    function isValidMarketTrend(data) {
+      return data.keys().hasAll(['neighborhood', 'averagePricePerSqft', 'growthRate', 'monthlyHistory'])
+        && data.keys().size() == 4
+        && data.neighborhood is string && data.neighborhood.size() <= 100
+        && data.averagePricePerSqft is number && data.averagePricePerSqft >= 0
+        && data.growthRate is number
+        && data.monthlyHistory is string && data.monthlyHistory.size() <= 10000;
+    }
+
+
+    // --- COLLECTION MATCH RULES ---
+
+    // Listings Collection
+    match /listings/{listingId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidId(listingId) && isValidListing(incoming()) && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidId(listingId) && isValidListing(incoming());
+      allow delete: if isAdmin() && isValidId(listingId);
+    }
+
+    // Users and Subcollections
+    match /users/{userId} {
+      // Basic profile doc check
+      allow read: if isSignedIn() && request.auth.uid == userId;
+      allow write: if isSignedIn() && request.auth.uid == userId;
+
+      // Saved Searches
+      match /savedSearches/{searchId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(searchId) 
+          && isValidSavedSearch(incoming()) 
+          && incoming().createdAt == request.time;
+        allow update: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(searchId) 
+          && isValidSavedSearch(incoming())
+          && incoming().userId == userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().diff(existing()).affectedKeys().hasOnly(['neighborhood', 'maxPrice', 'minBeds', 'propertyType', 'activeNotifications']);
+        allow delete: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(searchId);
+      }
+
+      // Valuations
+      match /valuations/{valuationId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        allow create: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(valuationId) 
+          && isValidValuation(incoming()) 
+          && incoming().createdAt == request.time;
+        // Valuations are read-only / delete-only after creation
+        allow update: if false;
+        allow delete: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(valuationId);
+      }
+
+      // Notifications
+      match /notifications/{notificationId} {
+        allow read: if isSignedIn() && request.auth.uid == userId;
+        // Create is allowed by admin system or if owner wants to record one (e.g. self-reminders, but primarily server-fed listings trigger)
+        allow create: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(notificationId) 
+          && isValidNotification(incoming()) 
+          && incoming().createdAt == request.time;
+        // User can only update the 'read' flag on their notifications
+        allow update: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(notificationId)
+          && isValidNotification(incoming())
+          && incoming().userId == existing().userId
+          && incoming().title == existing().title
+          && incoming().message == existing().message
+          && incoming().createdAt == existing().createdAt
+          && (('listingId' in incoming() && 'listingId' in existing() && incoming().listingId == existing().listingId) || (!('listingId' in incoming()) && !('listingId' in existing())))
+          && incoming().diff(existing()).affectedKeys().hasOnly(['read']);
+        allow delete: if isSignedIn() 
+          && request.auth.uid == userId 
+          && isValidId(notificationId);
+      }
+    }
+
+    // Market Trends
+    match /marketTrends/{trendId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && isValidId(trendId) && isValidMarketTrend(incoming());
+      allow update: if isAdmin() && isValidId(trendId) && isValidMarketTrend(incoming());
+      allow delete: if isAdmin() && isValidId(trendId);
+    }
+
+    // Admins path
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if false; // Only manageable through google console or custom migration script
+    }
+  }
+}
